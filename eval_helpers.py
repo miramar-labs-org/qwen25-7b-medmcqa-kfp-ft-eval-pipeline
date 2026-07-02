@@ -1,26 +1,37 @@
-# Eval helper functions — inlined into baseline_eval and post_finetune_eval
-# by scripts/build_pipeline.py at the # <<< EVAL_HELPERS_INJECT >>> marker.
-# Customize extract_answer and _make_user_content for your dataset.
-# Do not add imports here that aren't available in the component container.
-
 import re as _re
 
 
 def extract_answer(text):
-    # TODO: implement for your dataset's answer format.
-    # For multiple-choice: return the letter (a/b/c/d).
-    # For yes/no: return 'yes' or 'no'.
-    return text.strip().lower().split()[0] if text.strip() else ""
-
-
-def make_infer_fn(tokenizer, model, system_message, max_new_tokens, do_sample):
-    # TODO: implement for your model's chat template and generation config.
-    def _infer(row):
-        return ""  # TODO: apply chat template, generate, decode
-    return _infer
+    """Normalize model output to a comparable answer token."""
+    t = text.strip().lower()
+    # MCQ letter (a-d)
+    m = _re.search(r'\b([a-d])\b', t)
+    if m:
+        return m.group(1).upper()
+    # fallback: first token if it's a single letter
+    first = t.split()[0] if t else ""
+    if len(first) == 1 and first.isalpha():
+        return first.upper()
+    return first
 
 
 def _make_user_content(row):
-    # TODO: format the user-turn content for inference.
-    # row has keys: instruction, response, source
     return row["instruction"]
+
+
+def make_infer_fn(tokenizer, model, system_message, max_new_tokens, do_sample):
+    import torch
+
+    def _infer(row):
+        messages = [{"role": "user", "content": _make_user_content(row)}]
+        ids = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt"
+        ).to(model.device)
+        with torch.no_grad():
+            out = model.generate(
+                ids, max_new_tokens=max_new_tokens, do_sample=do_sample,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        return tokenizer.decode(out[0][ids.shape[-1]:], skip_special_tokens=True).strip()
+
+    return _infer
