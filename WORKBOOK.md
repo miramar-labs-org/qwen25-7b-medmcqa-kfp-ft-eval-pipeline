@@ -166,3 +166,53 @@ python3 -c "from kfp import compiler; from pipeline import pipeline; \
 ```
 
 Then commit and deploy.
+
+---
+
+## Implementation Notes — run-001 (2026-07-02)
+
+### Dataset choice: openlifescienceai/medmcqa
+
+194k AIIMS/NEET PG multiple-choice questions covering 19 medical subjects (anatomy, physiology,
+pharmacology, pathology, etc.). Each row has: `question`, `opa/opb/opc/opd` (four option texts),
+`cop` (correct option index 0–3). No config needed; default train split used.
+
+Rationale: large enough to train on a 5h budget without overfitting, hard enough that a base
+model at 64% leaves meaningful headroom, and the cop-index format is clean to map to letters
+(`cop=0 → "A"`, `cop=1 → "B"`, etc.). Medical domain aligns with the project's clinical template arc.
+
+### formatters.py — medmcqa
+
+```python
+cop = example.get("cop", 0)
+answer_letter = OPTION_LABELS[int(cop)] if cop is not None else "A"
+```
+
+Builds a standard MCQ prompt: `{question}\n\nOptions:\nA. ...\nB. ...\nC. ...\nD. ...\n\nAnswer with the letter only.`
+Response is the single letter. This format matches what `extract_answer()` expects (first `[a-e]` match).
+
+### eval_helpers.py — extract_answer
+
+Letter regex `\b([a-e])\b` covers the model's raw output regardless of casing or surrounding text.
+`apply_chat_template` used universally — Qwen2.5 uses its own template which handles the user/assistant
+format correctly without a system message injection.
+
+### LoRA config rationale
+
+- `r=16, α=32` (scaling=2.0): standard for 7B fine-tuning with a single task domain
+- 7 target modules (`q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj`): full attention + MLP adaptation gives richer domain adaptation than attention-only for MCQ reasoning tasks
+- `batch_size=2, grad_accum=4` (effective batch=8): fits within 100 GiB budget alongside model weights and optimizer states; larger effective batches showed instability in prior arc runs
+
+### Training trajectory (run-001)
+
+The training loss showed persistent sawtooth oscillation throughout (range 0.78–0.94) rather than the
+smooth monotonic descent seen in lower-variance datasets. This is likely due to medmcqa's mix of
+19 medical subjects — the model alternates between easy (single-subject) and hard (cross-subject)
+batches. The sawtooth did not converge before the 5h cutoff; final HF average train_loss=0.8753
+across 0.593 epochs. Despite the noise, post-FT accuracy improved strongly: 0.64 → 0.75 (+17.2%).
+
+### run-002 hypothesis
+
+The loss was still actively descending when the cutoff fired — not converged. Extending to 1.5–2.0
+epochs (12h budget) should close the gap toward the 0.85+ range. Consider also increasing eval
+`sample_size` from 200 → 500 to reduce variance in accuracy measurement between runs.
